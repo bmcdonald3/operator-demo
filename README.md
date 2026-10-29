@@ -61,10 +61,10 @@ Verify that the operator created `testcluster-boot-images` in S3 (LocalStack) an
 ```bash
 export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 AWS_PAGER=""
 
-aws --endpoint-url=[http://127.0.0.1:4566](http://127.0.0.1:4566) s3 ls
-echo "dummy-kernel-payload" | aws --endpoint-url=[http://127.0.0.1:4566](http://127.0.0.1:4566) s3 cp - s3://testcluster-boot-images/vmlinuz-6.8
-echo "dummy-initrd-payload" | aws --endpoint-url=[http://127.0.0.1:4566](http://127.0.0.1:4566) s3 cp - s3://testcluster-boot-images/initramfs-6.8.img
-aws --endpoint-url=[http://127.0.0.1:4566](http://127.0.0.1:4566) s3 ls s3://testcluster-boot-images/
+aws --endpoint-url=http://127.0.0.1:4566 s3 ls
+echo "dummy-kernel-payload" | aws --endpoint-url=http://127.0.0.1:4566 s3 cp - s3://testcluster-boot-images/vmlinuz-6.8
+echo "dummy-initrd-payload" | aws --endpoint-url=http://127.0.0.1:4566 s3 cp - s3://testcluster-boot-images/initramfs-6.8.img
+aws --endpoint-url=http://127.0.0.1:4566 s3 ls s3://testcluster-boot-images/
 ```
 
 ---
@@ -82,7 +82,7 @@ PF_BSS_PID=$!
 ### 3.2 Verify JWT Enforcement & Mint Admin Tokens via TokenSmith
 ```bash
 # 1. Show that unauthenticated writes are rejected by SMD (HTTP 401 "no token found")
-curl -i -X POST [http://127.0.0.1:27779/hsm/v2/State/Components](http://127.0.0.1:27779/hsm/v2/State/Components)
+curl -i -X POST http://127.0.0.1:27779/hsm/v2/State/Components
 
 # 2. Mint an admin JWT for SMD
 export SMD_JWT=$(kubectl exec -n openchami-testcluster deploy/tokensmith -- \
@@ -105,7 +105,7 @@ export BSS_JWT=$(kubectl exec -n openchami-testcluster deploy/tokensmith -- \
 
 ### 3.3 Register 2 Compute Nodes in SMD
 ```bash
-curl -sS -X POST [http://127.0.0.1:27779/hsm/v2/State/Components](http://127.0.0.1:27779/hsm/v2/State/Components) \
+curl -sS -X POST http://127.0.0.1:27779/hsm/v2/State/Components \
   -H "Authorization: Bearer ${SMD_JWT}" \
   -H "Content-Type: application/json" \
   -d '{
@@ -136,14 +136,14 @@ curl -sS -X POST [http://127.0.0.1:27779/hsm/v2/State/Components](http://127.0.0
   }'
 
 # Query SMD to verify both nodes are stored in PostgreSQL
-curl -sS [http://127.0.0.1:27779/hsm/v2/State/Components](http://127.0.0.1:27779/hsm/v2/State/Components) \
+curl -sS http://127.0.0.1:27779/hsm/v2/State/Components \
   -H "Authorization: Bearer ${SMD_JWT}" | jq .
 ```
 
 ### 3.4 Register Node MAC/IP Mapping & Hardware Group in SMD
 ```bash
 # Register Ethernet interface (00:de:ad:be:ef:01 -> 172.16.0.101) for x1000c0s0b0n0
-curl -sS -X POST [http://127.0.0.1:27779/hsm/v2/Inventory/EthernetInterfaces](http://127.0.0.1:27779/hsm/v2/Inventory/EthernetInterfaces) \
+curl -sS -X POST http://127.0.0.1:27779/hsm/v2/Inventory/EthernetInterfaces \
   -H "Authorization: Bearer ${SMD_JWT}" \
   -H "Content-Type: application/json" \
   -d '{
@@ -154,7 +154,7 @@ curl -sS -X POST [http://127.0.0.1:27779/hsm/v2/Inventory/EthernetInterfaces](ht
   }' | jq .
 
 # Create a "compute" group in SMD containing both nodes
-curl -sS -X POST [http://127.0.0.1:27779/hsm/v2/groups](http://127.0.0.1:27779/hsm/v2/groups) \
+curl -sS -X POST http://127.0.0.1:27779/hsm/v2/groups \
   -H "Authorization: Bearer ${SMD_JWT}" \
   -H "Content-Type: application/json" \
   -d '{
@@ -166,7 +166,7 @@ curl -sS -X POST [http://127.0.0.1:27779/hsm/v2/groups](http://127.0.0.1:27779/h
   }' | jq .
 
 # Query the group back from SMD
-curl -sS [http://127.0.0.1:27779/hsm/v2/groups/compute](http://127.0.0.1:27779/hsm/v2/groups/compute) \
+curl -sS http://127.0.0.1:27779/hsm/v2/groups/compute \
   -H "Authorization: Bearer ${SMD_JWT}" | jq .
 ```
 
@@ -177,7 +177,7 @@ curl -sS [http://127.0.0.1:27779/hsm/v2/groups/compute](http://127.0.0.1:27779/h
 ### 4.1 Register the Node and Boot Parameters in BSS
 ```bash
 # Register node record in BSS
-curl -sS -X POST [http://127.0.0.1:27778/nodes](http://127.0.0.1:27778/nodes) \
+curl -sS -X POST http://127.0.0.1:27778/nodes \
   -H "Authorization: Bearer ${BSS_JWT}" \
   -H "Content-Type: application/json" \
   -d '{
@@ -191,7 +191,7 @@ curl -sS -X POST [http://127.0.0.1:27778/nodes](http://127.0.0.1:27778/nodes) \
   }' | jq .
 
 # Register kernel, initrd, and kernel cmdline parameters in BSS
-curl -sS -X POST [http://127.0.0.1:27778/boot/v1/bootparameters](http://127.0.0.1:27778/boot/v1/bootparameters) \
+curl -sS -X POST http://127.0.0.1:27778/boot/v1/bootparameters \
   -H "Authorization: Bearer ${BSS_JWT}" \
   -H "Content-Type: application/json" \
   -d '{
@@ -200,24 +200,24 @@ curl -sS -X POST [http://127.0.0.1:27778/boot/v1/bootparameters](http://127.0.0.
     "nids": ["1"],
     "kernel": "http://openchami-localstack-dev:4566/testcluster-boot-images/vmlinuz-6.8",
     "initrd": "http://openchami-localstack-dev:4566/testcluster-boot-images/initramfs-6.8.img",
-    "params": "console=ttyS0,115200n8 ds=nocloud-net;s=[https://testcluster.local/cloud-init/](https://testcluster.local/cloud-init/)"
+    "params": "console=ttyS0,115200n8 ds=nocloud-net;s=https://testcluster.local/cloud-init/"
   }' | jq .
 
 # Inspect stored boot parameters
-curl -sS [http://127.0.0.1:27778/boot/v1/bootparameters](http://127.0.0.1:27778/boot/v1/bootparameters) \
+curl -sS http://127.0.0.1:27778/boot/v1/bootparameters \
   -H "Authorization: Bearer ${BSS_JWT}" | jq .
 ```
 
 ### 4.2 Simulate an Unauthenticated Node PXE Boot Request
 ```bash
 # Fetch iPXE script by XName
-curl -sS "[http://127.0.0.1:27778/boot/v1/bootscript?host=x1000c0s0b0n0](http://127.0.0.1:27778/boot/v1/bootscript?host=x1000c0s0b0n0)"
+curl -sS "http://127.0.0.1:27778/boot/v1/bootscript?host=x1000c0s0b0n0"
 
 # Fetch iPXE script by NID
-curl -sS "[http://127.0.0.1:27778/boot/v1/bootscript?nid=1](http://127.0.0.1:27778/boot/v1/bootscript?nid=1)"
+curl -sS "http://127.0.0.1:27778/boot/v1/bootscript?nid=1"
 
 # Fetch iPXE script by MAC address
-curl -sS "[http://127.0.0.1:27778/boot/v1/bootscript?mac=00:de:ad:be:ef:01](http://127.0.0.1:27778/boot/v1/bootscript?mac=00:de:ad:be:ef:01)"
+curl -sS "http://127.0.0.1:27778/boot/v1/bootscript?mac=00:de:ad:be:ef:01"
 ```
 
 ---
@@ -225,5 +225,5 @@ curl -sS "[http://127.0.0.1:27778/boot/v1/bootscript?mac=00:de:ad:be:ef:01](http
 ## Part 5: Cleanup Port-Forwards
 
 ```bash
-kill ${PF_SMD_PID}${PF_BSS_PID} 2>/dev/null || true
+kill "$PF_SMD_PID" "$PF_BSS_PID" 2>/dev/null || true
 ```
