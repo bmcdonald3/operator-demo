@@ -1,0 +1,99 @@
+apiVersion: openchami.openchami.org/v1alpha1
+kind: OpenCHAMIControlPlane
+metadata:
+  name: testcluster
+  namespace: default
+  annotations:
+    # Safety: don't clean up Vault or S3 when this test cluster is deleted
+    # openchami.org/cleanup-vault: "true"
+    # openchami.org/cleanup-s3: "true"
+spec:
+  clusterName: testcluster
+  domain: testcluster.local
+
+  platform:
+    vault:
+      # Single-label docker hostname on the 'kind' docker network.
+      # dev-up attaches the openchami-vault-dev container to that
+      # network; CoreDNS forwards to the kind node's resolver, which
+      # in turn talks to docker's embedded DNS, so VSO running
+      # inside the cluster can dial this host by name. From the
+      # host you can also reach the same Vault on http://localhost:8200.
+      #
+      # The scheme is http:// (NOT https://) because dev-mode Vault
+      # never serves TLS. The operator's webhook accepts http:// for
+      # cluster-internal hosts (loopback / single-label DNS /
+      # *.svc[.cluster.local] / RFC1918 / IPv6 ULA-link-local) — see
+      # isAllowedVaultAddress in api/v1alpha1/openchamicontrolplane_webhook.go.
+      # Public hostnames still require https://.
+      address: "http://openchami-vault-dev:8200"
+      authMethod: appRole
+      appRoleSecretRef:
+        name: testcluster-approle     # created by hack/local-dev/seed-vault.sh
+
+    objectStorage:
+      endpoint: "http://openchami-localstack-dev:4566"  # localstack on the kind network
+      bucket: testcluster-boot-images
+      tlsInsecure: true
+
+  networkProbe:
+    enabled: false   # disabled in dev — nodes pre-labeled via kind-config.yaml
+
+  services:
+    smd:
+      enabled: true
+      replicas: 1
+      image:
+        tag: v2.20.3
+        pullPolicy: Always
+    tokensmith:
+      enabled: true
+      image:
+        tag: pr-24
+        pullPolicy: Always
+      oidcProvider: vault
+    bootService:
+      enabled: true
+      replicas: 1
+    metadataService:
+      enabled: true
+      replicas: 1
+      image:
+        tag: pr-15
+        pullPolicy: Always
+    coreDHCP:
+      enabled: true
+      nodeSelector:
+        openchami.org/testcluster-provision-network-ready: "true"
+      leaseRanges:
+        - subnet: 192.168.100.0/24
+          start: 192.168.100.100
+          end: 192.168.100.200
+    magellan:
+      enabled: true
+      bmcSubnet: 192.168.200.0/24
+      nodeSelector:
+        openchami.org/testcluster-bmc-network-ready: "true"
+      schedule: "0 * * * *"   # hourly in dev
+
+  networking:
+    gatewayClass: envoy
+    tls:
+      issuer: selfsigned-dev   # use a selfsigned issuer in dev
+
+  database:
+    instances: 1   # single instance in dev
+    storageSize: 5Gi
+
+  logging:
+    # Disabled in dev: the upstream funicular-collector image
+    # (`ghcr.io/openchami/funicular-collector`) is not yet published on
+    # ghcr.io. To enable, set enabled: true AND supply a working image
+    # under spec.logging.image (Repository + Tag) — e.g. a fluent-bit /
+    # vector / otel-collector build configured for the funicular schema.
+    enabled: false
+    logBucket: testcluster-logs
+    retentionDays: 7
+    flushIntervalSeconds: 30
+
+  operatorChannel: stable
