@@ -38,9 +38,6 @@ kubectl patch openchamicontrolplane testcluster -n default --type=merge \
 Wait for the operator to provision the namespace, PostgreSQL databases, S3 bucket, TLS certificates, Envoy Gateway routes, and OpenCHAMI pods (60–90 seconds):
 
 ```bash
-kubectl wait --for=jsonpath='{.status.phase}'=Ready \
-  openchamicontrolplane/testcluster -n default --timeout=180s
-
 kubectl get openchamicontrolplane testcluster
 kubectl get pods -n openchami-testcluster
 ```
