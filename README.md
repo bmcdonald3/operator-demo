@@ -1,6 +1,6 @@
 # OpenCHAMI Operator Live Demo Guide
 
-## Pre-Demo Setup (Run 5 Minutes Before Presenting)
+## Setup OpenCHAMI Operator
 
 ```bash
 # 1. Start Kind, Vault, LocalStack, and prerequisite controllers (~2-3 mins if cold)
