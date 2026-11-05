@@ -54,6 +54,8 @@ DEMO_DIR=$(mktemp -d)
 read -r -p 'BMC username: ' BMC_USERNAME
 read -r -s -p 'BMC password: ' BMC_PASSWORD
 printf '\n'
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}172.24.0.3,127.0.0.1,localhost"
+export no_proxy="${no_proxy:+$no_proxy,}172.24.0.3,127.0.0.1,localhost"
 magellan scan https://172.24.0.3:443 --insecure --cache "$DEMO_DIR/assets.db"
 magellan collect --cache "$DEMO_DIR/assets.db" --insecure \
   --username "$BMC_USERNAME" --password "$BMC_PASSWORD" \
