@@ -64,6 +64,7 @@ api_call() {
 
   local http_code
   http_code="$(curl "${curl_args[@]}")"
+  API_HTTP_CODE="$http_code"
   echo "--> ${method} ${url} [HTTP ${http_code}]"
 
   if [[ -s "$tmp_body" ]]; then
@@ -172,17 +173,44 @@ BMC_MAP="$(jq -nc --arg ip "$BMC_IP" --arg id "$BMC_XNAME" \
   --username "$BMC_USERNAME" --password "$BMC_PASSWORD" \
   --bmc-id-map "$BMC_MAP" --output-format json --output-file "$DISCOVERY_DIR/inventory.json"
 unset BMC_PASSWORD
-jq -e 'if type == "array" then length > 0 else type == "object" and length > 0 end' \
-  "$DISCOVERY_DIR/inventory.json" >/dev/null
-ACCESS_TOKEN="$SMD_JWT" "$MAGELLAN_BIN" send --input-format json \
-  --force-update --data "@$DISCOVERY_DIR/inventory.json" http://127.0.0.1:27779
+CURRENT_ENDPOINT="$(jq -ce --arg bmc "$BMC_XNAME" '
+  (if type == "array" then . else [.] end) |
+  if length == 1 and .[0].ID == $bmc and (.[0].Systems | length) > 0
+  then .[0] else error("Expected one collected BMC with real Redfish systems") end
+' "$DISCOVERY_DIR/inventory.json")"
+CURRENT_SYSTEMS="$(jq -ce '
+  reduce .Systems[] as $system ([];
+    if any(.[]; .uuid == $system.uuid) then . else . + [$system] end) |
+  if all(.[]; (.uuid | type == "string" and length > 0) and
+    (.uri | type == "string" and length > 0)) then .
+  else error("Collected systems require UUID and Redfish URI") end
+' <<< "$CURRENT_ENDPOINT")"
+if ! api_call POST http://127.0.0.1:27779/hsm/v2/Inventory/RedfishEndpoints \
+  "$SMD_JWT" "$CURRENT_ENDPOINT"; then
+  if [[ "$API_HTTP_CODE" != 409 ]] || ! api_call PUT \
+    "http://127.0.0.1:27779/hsm/v2/Inventory/RedfishEndpoints/${BMC_XNAME}" \
+    "$SMD_JWT" "$CURRENT_ENDPOINT"; then
+    echo "SMD rejected the collected inventory; stopping without selecting existing records." >&2
+    echo "For 'Invalid CompEthInterface IP Address', deploy SMD with the empty NIC-IP mapping fix. Do not invent an IP." >&2
+    exit 1
+  fi
+fi
 
 echo ""
 echo "=== 9. Inspecting Discovered SMD Nodes and Interfaces ==="
 curl -fsS http://127.0.0.1:27779/hsm/v2/State/Components \
   -H "Authorization: Bearer $SMD_JWT" > "$DISCOVERY_DIR/components.json"
-DISCOVERED_NODES="$(jq --arg prefix "${BMC_XNAME}n" \
-  '[.Components[] | select(.Type == "Node" and (.ID | startswith($prefix)))]' \
+curl -fsS http://127.0.0.1:27779/hsm/v2/Inventory/ComponentEndpoints \
+  -H "Authorization: Bearer $SMD_JWT" > "$DISCOVERY_DIR/endpoints.json"
+DISCOVERED_NODES="$(jq --arg bmc "$BMC_XNAME" --argjson systems "$CURRENT_SYSTEMS" \
+  --slurpfile endpoints "$DISCOVERY_DIR/endpoints.json" '
+  [.Components[] | select(.Type == "Node") | . as $node |
+    $endpoints[0].ComponentEndpoints[] |
+    select(.ID == $node.ID and .RfEndpointID == $bmc) | . as $identity |
+    $systems[] | select(.uuid == $identity.UUID and
+      (.uri | sub("^https?://[^/]+"; "")) == $identity.OdataID) |
+    {ID:$node.ID, UUID:.uuid, RedfishURI:.uri, Inventory:.}]
+  ' \
   "$DISCOVERY_DIR/components.json")"
 jq . <<< "$DISCOVERED_NODES"
 if [[ -z "${NODE_XNAME:-}" ]]; then
@@ -191,8 +219,14 @@ fi
 jq -e --arg node "$NODE_XNAME" 'any(.[]; .ID == $node)' <<< "$DISCOVERED_NODES" >/dev/null
 curl -fsS http://127.0.0.1:27779/hsm/v2/Inventory/EthernetInterfaces \
   -H "Authorization: Bearer $SMD_JWT" > "$DISCOVERY_DIR/interfaces.json"
-NODE_INTERFACES="$(jq --arg node "$NODE_XNAME" \
-  '[.[] | select(.ComponentID == $node)]' "$DISCOVERY_DIR/interfaces.json")"
+NODE_INTERFACES="$(jq --arg node "$NODE_XNAME" --slurpfile stored "$DISCOVERY_DIR/interfaces.json" '
+  [.[] | select(.ID == $node) | .Inventory.ethernet_interfaces[]? | . as $nic |
+    select(($nic.mac | type) == "string") |
+    select(any($stored[0][]; .ComponentID == $node and
+      (.MACAddress | ascii_downcase | gsub("-"; ":")) ==
+      ($nic.mac | ascii_downcase | gsub("-"; ":")))) |
+    . + {ComponentID:$node, MACAddress:($nic.mac | ascii_downcase | gsub("-"; ":"))}]
+  ' <<< "$DISCOVERED_NODES")"
 jq . <<< "$NODE_INTERFACES"
 
 if [[ -z "${BOOT_KERNEL_URL:-}" ]]; then

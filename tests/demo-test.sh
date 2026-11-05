@@ -7,6 +7,7 @@ export MAGELLAN_BIN=magellan_mock
 export BMC_USERNAME=offline-test-user BMC_PASSWORD=offline-test-password
 export BMC_IP=172.24.0.3 BMC_XNAME=x1000c0s0b0
 export TEST_MULTIPLE_NICS=false TEST_MULTIPLE_NODES=false
+export TEST_IMPORT_FAILURE=false
 unset NODE_XNAME BOOT_MAC BOOT_KERNEL_URL BOOT_INITRD_URL BOOT_PARAMS
 
 kubectl() {
@@ -27,7 +28,13 @@ magellan_mock() {
     collect)
       while [[ $# -gt 0 ]]; do
         if [[ "$1" == --output-file ]]; then
-          printf '[{"ID":"x1000c0s0b0"}]\n' > "$2"
+          jq -nc --argjson multiple "$TEST_MULTIPLE_NODES" --argjson nics "$TEST_MULTIPLE_NICS" '
+            {ID:"x1000c0s0b0",Systems:([
+              {uuid:"real-system-uuid",uri:"/redfish/v1/Systems/RealServer",
+               ethernet_interfaces:([{mac:"02:11:22:33:44:55",uri:"/redfish/v1/Systems/RealServer/EthernetInterfaces/1"}] +
+                 if $nics then [{mac:"02:11:22:33:44:66"}] else [] end)}] +
+              if $multiple then [{uuid:"second-real-uuid",uri:"/redfish/v1/Systems/SecondServer"}] else [] end)}
+          ' > "$2"
           return 0
         fi
         shift
@@ -60,6 +67,20 @@ curl() {
     shift
   done
   case "$url" in
+    */Inventory/RedfishEndpoints*)
+      if [[ "$TEST_IMPORT_FAILURE" == true ]]; then
+        printf '400'
+      else
+        printf '200'
+      fi
+      ;;
+    */Inventory/ComponentEndpoints)
+      if [[ "$TEST_MULTIPLE_NODES" == true ]]; then
+        printf '%s\n' '{"ComponentEndpoints":[{"ID":"x1000c0s0b0n0","RfEndpointID":"x1000c0s0b0","UUID":"real-system-uuid","OdataID":"/redfish/v1/Systems/RealServer"},{"ID":"x1000c0s0b0n1","RfEndpointID":"x1000c0s0b0","UUID":"second-real-uuid","OdataID":"/redfish/v1/Systems/SecondServer"}]}'
+      else
+        printf '%s\n' '{"ComponentEndpoints":[{"ID":"x1000c0s0b0n0","RfEndpointID":"x1000c0s0b0","UUID":"real-system-uuid","OdataID":"/redfish/v1/Systems/RealServer"},{"ID":"x1000c0s0b0n1","RfEndpointID":"x1000c0s0b0","UUID":"stale-uuid","OdataID":"/redfish/v1/Systems/OldDemo"}]}'
+      fi
+      ;;
     */State/Components)
       if [[ "$method" == POST ]]; then
         printf 401
@@ -67,7 +88,7 @@ curl() {
         if [[ "$TEST_MULTIPLE_NODES" == true ]]; then
           printf '%s\n' '{"Components":[{"ID":"x1000c0s0b0n0","Type":"Node"},{"ID":"x1000c0s0b0n1","Type":"Node"}]}'
         else
-          printf '%s\n' '{"Components":[{"ID":"x1000c0s0b0n0","Type":"Node"}]}'
+          printf '%s\n' '{"Components":[{"ID":"x1000c0s0b0n0","Type":"Node"},{"ID":"x1000c0s0b0n1","Type":"Node","State":"Standby","NID":2}]}'
         fi
       fi
       ;;
@@ -93,7 +114,18 @@ export -f kubectl aws magellan_mock curl
 result="$(bash "$ROOT_DIR/demo.sh")"
 [[ "$result" == *'Discovery complete.'* ]]
 [[ "$result" == *'02:11:22:33:44:55'* ]]
+[[ "$result" != *'x1000c0s0b0n1'* ]]
 printf 'PASS: real-BMC target and discovered SMD array parsing\n'
+printf 'PASS: stale synthetic node excluded despite matching BMC prefix\n'
+
+export TEST_IMPORT_FAILURE=true
+if result="$(bash "$ROOT_DIR/demo.sh" 2>&1)"; then
+  printf 'FAIL: failed SMD import was accepted\n' >&2
+  exit 1
+fi
+[[ "$result" != *'Inspecting Discovered SMD'* ]]
+printf 'PASS: HTTP 400 stops before inspecting stale SMD records\n'
+export TEST_IMPORT_FAILURE=false
 
 export BMC_PASSWORD=offline-test-password
 export BOOT_KERNEL_URL=http://boot.test/vmlinuz

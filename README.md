@@ -4,7 +4,7 @@ This demo discovers the real BMC at `172.24.0.3` using a pre-built Magellan CLI 
 
 ## Prerequisites
 
-- A pre-built Magellan executable with `scan`, `collect`, and `send` commands.
+- A pre-built Magellan executable with `scan` and `collect` commands.
 - The OpenCHAMI operator checkout, including its development cluster and minimal control-plane fixture. The default location is `../openchami-operator` relative to this demo repository.
 - `bash`, `make`, `kubectl`, `curl`, `jq`, and the AWS CLI on the workstation.
 - A route from the workstation to `172.24.0.3:443` and a BMC account permitted to read Redfish inventory. The BMC IP is not the compute node's PXE IP or MAC address.
@@ -31,7 +31,7 @@ make -C "$OPERATOR_DIR" build
 make -C "$OPERATOR_DIR" dev-deploy
 ```
 
-Set `MAGELLAN_BIN` to your existing executable if it is elsewhere. `BMC_XNAME` is an explicit demo location assignment for this BMC, not a value inferred from Redfish. Change it to your real cabinet/chassis/slot assignment if appropriate. Magellan derives node XNames under this BMC from the discovered systems.
+Set `MAGELLAN_BIN` to your existing executable if it is elsewhere. `BMC_XNAME` is an explicit location assignment for this BMC, not a value inferred from Redfish. Change it to your real cabinet/chassis/slot assignment if appropriate. SMD assigns node XNames under this BMC; the script verifies their UUID and Redfish URI against systems in the current Magellan collection.
 
 Do not delete `testcluster` for an ordinary rerun. A reset removes the operator-managed control plane and its inventory; use `bash ./demo.sh --reset` only when you intentionally want a fresh development environment.
 
@@ -51,17 +51,25 @@ The script deploys `testcluster`, waits for `Ready`, checks the S3 bucket, start
 ```text
 Magellan scan https://172.24.0.3:443
   -> Magellan collect (Redfish credentials and BMC XName map)
-  -> Magellan send (SMD JWT)
+  -> HTTP import of unchanged collected inventory (SMD JWT, checked status)
   -> SMD node and Ethernet inventory
 ```
 
 Only that BMC is scanned. Each run uses an isolated temporary cache, so old scan results cannot introduce unrelated hardware. The cache and inventory file are private and removed on exit. Existing SMD/BSS records are not deleted. Collection currently passes credentials using Magellan's CLI flags; avoid shell tracing (`bash -x`), debug logging, and running on a shared workstation where process arguments can be inspected.
 
-Magellan `send --force-update` refreshes this mapped BMC if SMD rejects a duplicate registration. Reruns do not delete unrelated inventory or BSS records.
+The script imports the exact collected BMC payload directly into SMD so a failed HTTP response stops the demo even with older Magellan binaries whose `send` command logs errors but exits successfully. Only HTTP 409 (duplicate registration) triggers a PUT retry for this BMC. Other errors stop before existing SMD inventory is inspected. Reruns do not delete unrelated inventory or BSS records.
 
 The script uses `--insecure` for BMC scan and collection to accommodate a self-signed lab certificate. This bypass applies to the BMC only, not to SMD. For a trusted BMC certificate, remove those flags and use your installed Magellan's CA options as supported by `--help`.
 
-The script prints discovered node records and their Ethernet interfaces. It never writes fake compute nodes, MAC addresses, NIDs, or node IP addresses. If the BMC exposes multiple nodes, rerun with `NODE_XNAME` set to one of the printed IDs. If no node appears, inspect the Redfish inventory and SMD logs rather than creating a synthetic fallback.
+The script prints current Magellan system data alongside verified SMD IDs. Existing same-prefix nodes are excluded unless their endpoint UUID and Redfish URI match this collection. NIC MACs and IPs come from this collection, not old SMD records. It never writes synthetic compute nodes, MAC addresses, NIDs, or node IP addresses. If the BMC exposes multiple nodes, rerun with `NODE_XNAME` set to one of the verified IDs. If no node appears, inspect the Redfish inventory and SMD logs rather than creating a synthetic fallback.
+
+### SMD Rejects Interfaces With No IP
+
+`Invalid CompEthInterface IP Address` can occur when an older SMD importer creates an empty IP mapping for a real Redfish NIC that has no assigned IP. A MAC-only NIC is valid inventory; do not add a dummy IP or discard the NIC to bypass this error.
+
+The local SMD source fixes this in `parseRedfishEndpointDataV2`: it adds an `IPAddressMapping` only when the collected `eth.IP` is non-empty, while retaining the Ethernet interface. Deploy an SMD image containing that fix and confirm the running pod uses it. Redeploying the operator alone does not update a separately built SMD image.
+
+A failed import may partially write records in older SMD versions. The script stops on the error and does not claim those records as successful discovery. Old demo records can remain in SMD but are not selected merely because they share an XName prefix. State, role and NID shown by the SMD API may be assigned defaults or retained metadata, not facts collected from Redfish.
 
 ## Part 3: Inspect the Provisioned Control Plane
 
