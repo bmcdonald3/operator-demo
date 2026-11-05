@@ -1,226 +1,159 @@
 # OpenCHAMI Operator Live Demo Guide
 
-## Setup OpenCHAMI Operator
+This demo discovers the real BMC at `172.24.0.3` using a pre-built Magellan CLI on your workstation, sends its Redfish inventory to the operator-managed SMD, and optionally generates a BSS boot script for a discovered node. It does not reset, power-cycle, or change boot settings on the server.
+
+## Prerequisites
+
+- A pre-built Magellan executable with `scan`, `collect`, and `send` commands.
+- The OpenCHAMI operator checkout, including its development cluster and minimal control-plane fixture. The default location is `../openchami-operator` relative to this demo repository.
+- `bash`, `make`, `kubectl`, `curl`, `jq`, and the AWS CLI on the workstation.
+- A route from the workstation to `172.24.0.3:443` and a BMC account permitted to read Redfish inventory. The BMC IP is not the compute node's PXE IP or MAC address.
+
+The current operator checkout does not implement the scheduled Magellan discovery pipeline: BMC credentials and SMD authentication are not wired into its CronJob. This guide disables only that in-cluster scheduler and uses the pre-built CLI for discovery. No Magellan build or container image is required.
+
+## Part 1: Set Up the Operator
+
+Run these commands from this demo repository:
 
 ```bash
-# 1. Start Kind, Vault, LocalStack, and prerequisite controllers (~2-3 mins if cold)
-make dev-up
+export OPERATOR_DIR="${OPERATOR_DIR:-$PWD/../openchami-operator}"
+export MAGELLAN_BIN="${MAGELLAN_BIN:-$PWD/../magellan/magellan}"
+export BMC_IP=172.24.0.3
+export BMC_XNAME=x1000c0s0b0
 
-# 2. Build binaries and deploy the OpenCHAMI operator into the cluster (~1 min)
-make build
-make dev-deploy
+"$MAGELLAN_BIN" version
+"$MAGELLAN_BIN" scan --help
+"$MAGELLAN_BIN" collect --help
+"$MAGELLAN_BIN" send --help
 
-# 3. Clean up any previous testcluster run so the demo starts fresh
-kubectl delete openchamicontrolplane testcluster --ignore-not-found --wait=true
+make -C "$OPERATOR_DIR" dev-up
+make -C "$OPERATOR_DIR" build
+make -C "$OPERATOR_DIR" dev-deploy
 ```
 
----
+Set `MAGELLAN_BIN` to your existing executable if it is elsewhere. `BMC_XNAME` is an explicit demo location assignment for this BMC, not a value inferred from Redfish. Change it to your real cabinet/chassis/slot assignment if appropriate. Magellan derives node XNames under this BMC from the discovered systems.
 
-## Part 1: Preview & Deploy the OpenCHAMI Control Plane
+Do not delete `testcluster` for an ordinary rerun. A reset removes the operator-managed control plane and its inventory; use `bash ./demo.sh --reset` only when you intentionally want a fresh development environment.
 
-### 1.1 Dry-Run Preview with `ochami-admin`
-Preview the Kubernetes, Vault, and networking resources the operator will generate from `test/fixtures/minimal-controlplane.yaml`:
+## Part 2: Discover the Real Hardware
+
+Enter the BMC username locally; the script prompts for the password without echoing it. Do not paste credentials into this guide or commit them. Run the script in Bash, not by sourcing it.
 
 ```bash
-./bin/ochami-admin describe -f test/fixtures/minimal-controlplane.yaml
+printf 'BMC username: '
+IFS= read -r BMC_USERNAME
+export BMC_USERNAME
+bash ./demo.sh
 ```
 
-### 1.2 Apply the Control Plane Manifest
-Deploy `testcluster` and disable `magellan` so the control plane reaches `PHASE=Ready`:
+The script deploys `testcluster`, waits for `Ready`, checks the S3 bucket, starts SMD/BSS port-forwards, and mints TokenSmith JWTs. It verifies that SMD rejects unauthenticated writes, then uses this discovery flow:
 
-```bash
-kubectl apply -f test/fixtures/minimal-controlplane.yaml
-kubectl patch openchamicontrolplane testcluster -n default --type=merge \
-  -p '{"spec":{"services":{"magellan":{"enabled":false}}}}'
+```text
+Magellan scan https://172.24.0.3:443
+  -> Magellan collect (Redfish credentials and BMC XName map)
+  -> Magellan send (SMD JWT)
+  -> SMD node and Ethernet inventory
 ```
 
-### 1.3 Watch the Control Plane Reconcile to `Ready`
-Wait for the operator to provision the namespace, PostgreSQL databases, S3 bucket, TLS certificates, Envoy Gateway routes, and OpenCHAMI pods (60–90 seconds):
+Only that BMC is scanned. Each run uses an isolated temporary cache, so old scan results cannot introduce unrelated hardware. The cache and inventory file are private and removed on exit. Existing SMD/BSS records are not deleted. Collection currently passes credentials using Magellan's CLI flags; avoid shell tracing (`bash -x`), debug logging, and running on a shared workstation where process arguments can be inspected.
+
+Magellan `send --force-update` refreshes this mapped BMC if SMD rejects a duplicate registration. Reruns do not delete unrelated inventory or BSS records.
+
+The script uses `--insecure` for BMC scan and collection to accommodate a self-signed lab certificate. This bypass applies to the BMC only, not to SMD. For a trusted BMC certificate, remove those flags and use your installed Magellan's CA options as supported by `--help`.
+
+The script prints discovered node records and their Ethernet interfaces. It never writes fake compute nodes, MAC addresses, NIDs, or node IP addresses. If the BMC exposes multiple nodes, rerun with `NODE_XNAME` set to one of the printed IDs. If no node appears, inspect the Redfish inventory and SMD logs rather than creating a synthetic fallback.
+
+## Part 3: Inspect the Provisioned Control Plane
 
 ```bash
-kubectl get openchamicontrolplane testcluster
+kubectl get openchamicontrolplane testcluster -n default
 kubectl get pods -n openchami-testcluster
-```
-
----
-
-## Part 2: Inspect What the Operator Provisioned Automatically
-
-### 2.1 Check All 17 Operator Status Conditions
-```bash
-kubectl get openchamicontrolplane testcluster \
+kubectl get openchamicontrolplane testcluster -n default \
   -o jsonpath='{range .status.conditions[*]}{.type}={.status} ({.reason}): {.message}{"\n"}{end}'
 ```
 
-### 2.2 Verify S3 Boot Image Bucket & Upload Boot Artifacts
-Verify that the operator created `testcluster-boot-images` in S3 (LocalStack) and upload a kernel and initrd:
+To inspect SMD after the script exits, start a new port-forward and mint a new token in the same shell:
+
+```bash
+kubectl port-forward -n openchami-testcluster svc/smd 27779:27779 &
+PF_SMD_PID=$!
+
+export SMD_JWT=$(kubectl exec -n openchami-testcluster deploy/tokensmith -- \
+  /usr/local/bin/tokensmith user-token create \
+  --subject demo-admin --audience hsm \
+  --scopes node:read,node:write,group:read,group:write \
+  --key-file /var/lib/tokensmith/keys/private.pem \
+  --enable-local-user-mint | tr -d '\r\n')
+
+curl -fsS http://127.0.0.1:27779/hsm/v2/Inventory/RedfishEndpoints \
+  -H "Authorization: Bearer $SMD_JWT" | jq .
+curl -fsS http://127.0.0.1:27779/hsm/v2/State/Components \
+  -H "Authorization: Bearer $SMD_JWT" | jq .
+curl -fsS http://127.0.0.1:27779/hsm/v2/Inventory/EthernetInterfaces \
+  -H "Authorization: Bearer $SMD_JWT" | jq .
+
+kill "$PF_SMD_PID"
+unset SMD_JWT
+```
+
+Wait for kubectl's `Forwarding from ...` message before issuing the curl requests.
+
+## Part 4: Optional Real Boot Artifacts and BSS Script
+
+Discovery does not require boot artifacts. To also configure BSS, provide an actual kernel, matching initrd, and kernel command line for your node. Do not use the old dummy payloads.
+
+LocalStack remains a development S3 store. You may upload real files to the provisioned bucket:
 
 ```bash
 export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 AWS_PAGER=""
 
-aws --endpoint-url=http://127.0.0.1:4566 s3 ls
-echo "dummy-kernel-payload" | aws --endpoint-url=http://127.0.0.1:4566 s3 cp - s3://testcluster-boot-images/vmlinuz-6.8
-echo "dummy-initrd-payload" | aws --endpoint-url=http://127.0.0.1:4566 s3 cp - s3://testcluster-boot-images/initramfs-6.8.img
+printf 'Path to kernel: '
+IFS= read -r KERNEL_FILE
+printf 'Path to initrd: '
+IFS= read -r INITRD_FILE
+aws --endpoint-url=http://127.0.0.1:4566 s3 cp "$KERNEL_FILE" s3://testcluster-boot-images/vmlinuz
+aws --endpoint-url=http://127.0.0.1:4566 s3 cp "$INITRD_FILE" s3://testcluster-boot-images/initramfs.img
 aws --endpoint-url=http://127.0.0.1:4566 s3 ls s3://testcluster-boot-images/
 ```
 
----
+Set the artifact URLs to addresses reachable from the compute node's PXE network, with permission to download the objects. `127.0.0.1`, the Kind-only `openchami-localstack-dev` hostname, and a workstation-only port-forward are not valid artifact addresses for the physical node. Uploading files does not establish external routing or anonymous object access.
 
-## Part 3: Authenticate via TokenSmith & Populate SMD Inventory
+The prompts below avoid embedding invented network details:
 
-### 3.1 Start Port-Forwards to SMD and Boot Script Service (BSS)
 ```bash
-kubectl port-forward -n openchami-testcluster svc/smd 27779:27779 >/dev/null 2>&1 &
-PF_SMD_PID=$!
-kubectl port-forward -n openchami-testcluster svc/boot-service 27778:27778 >/dev/null 2>&1 &
-PF_BSS_PID=$!
+printf 'Discovered node XName: '
+IFS= read -r NODE_XNAME
+printf 'Discovered PXE NIC MAC (not the BMC MAC): '
+IFS= read -r BOOT_MAC
+printf 'Node-reachable kernel URL: '
+IFS= read -r BOOT_KERNEL_URL
+printf 'Node-reachable initrd URL: '
+IFS= read -r BOOT_INITRD_URL
+printf 'Kernel command line for this node: '
+IFS= read -r BOOT_PARAMS
+export NODE_XNAME BOOT_MAC BOOT_KERNEL_URL BOOT_INITRD_URL BOOT_PARAMS
+
+bash ./demo.sh
 ```
 
-### 3.2 Verify JWT Enforcement & Mint Admin Tokens via TokenSmith
+The script verifies the chosen node and MAC against SMD inventory, registers boot parameters with those discovered identifiers, then fetches unauthenticated iPXE scripts by host and MAC. It does not assume a NID or overwrite a node's discovered state/role. Multiple NICs require an explicit PXE MAC choice; a single reported NIC is selected automatically if `BOOT_MAC` is unset.
+
+This demonstrates discovery and script generation, not a complete physical PXE boot. Actually booting requires DHCP/iPXE configuration, a node-reachable BSS endpoint, accessible artifacts, and any needed metadata service. Confirm those independently before changing boot order or powering the server.
+
+## Part 5: Cleanup
+
+The script stops its own port-forwards and removes temporary discovery files on exit. It leaves the control plane and discovered inventory intact. Clear local optional configuration after the demo:
+
 ```bash
-# 1. Show that unauthenticated writes are rejected by SMD (HTTP 401 "no token found")
-curl -i -X POST http://127.0.0.1:27779/hsm/v2/State/Components
-
-# 2. Mint an admin JWT for SMD
-export SMD_JWT=$(kubectl exec -n openchami-testcluster deploy/tokensmith -- \
-  /usr/local/bin/tokensmith user-token create \
-  --subject "demo-admin" \
-  --audience "hsm" \
-  --scopes "node:read,node:write,group:read,group:write" \
-  --key-file "/var/lib/tokensmith/keys/private.pem" \
-  --enable-local-user-mint | tr -d '\r\n')
-
-# 3. Mint an admin JWT for Boot Script Service (BSS)
-export BSS_JWT=$(kubectl exec -n openchami-testcluster deploy/tokensmith -- \
-  /usr/local/bin/tokensmith user-token create \
-  --subject "demo-admin" \
-  --audience "boot-service" \
-  --scopes "boot:read,boot:write,node:read,node:write" \
-  --key-file "/var/lib/tokensmith/keys/private.pem" \
-  --enable-local-user-mint | tr -d '\r\n')
+unset BMC_USERNAME BMC_PASSWORD SMD_JWT BSS_JWT
+unset NODE_XNAME BOOT_MAC BOOT_KERNEL_URL BOOT_INITRD_URL BOOT_PARAMS
 ```
 
-### 3.3 Register 2 Compute Nodes in SMD
-```bash
-curl -sS -X POST http://127.0.0.1:27779/hsm/v2/State/Components \
-  -H "Authorization: Bearer ${SMD_JWT}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "Components": [
-      {
-        "ID": "x1000c0s0b0n0",
-        "Type": "Node",
-        "State": "Ready",
-        "Flag": "OK",
-        "Enabled": true,
-        "Role": "Compute",
-        "NID": 1,
-        "NetType": "Sling",
-        "Arch": "X86"
-      },
-      {
-        "ID": "x1000c0s0b0n1",
-        "Type": "Node",
-        "State": "Standby",
-        "Flag": "OK",
-        "Enabled": true,
-        "Role": "Compute",
-        "NID": 2,
-        "NetType": "Sling",
-        "Arch": "X86"
-      }
-    ]
-  }'
+## Offline Validation
 
-# Query SMD to verify both nodes are stored in PostgreSQL
-curl -sS http://127.0.0.1:27779/hsm/v2/State/Components \
-  -H "Authorization: Bearer ${SMD_JWT}" | jq .
-```
-
-### 3.4 Register Node MAC/IP Mapping & Hardware Group in SMD
-```bash
-# Register Ethernet interface (00:de:ad:be:ef:01 -> 172.16.0.101) for x1000c0s0b0n0
-curl -sS -X POST http://127.0.0.1:27779/hsm/v2/Inventory/EthernetInterfaces \
-  -H "Authorization: Bearer ${SMD_JWT}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "ComponentID": "x1000c0s0b0n0",
-    "Description": "Node Management Network",
-    "MACAddress": "00:de:ad:be:ef:01",
-    "IPAddresses": [{"IPAddress": "172.16.0.101"}]
-  }' | jq .
-
-# Create a "compute" group in SMD containing both nodes
-curl -sS -X POST http://127.0.0.1:27779/hsm/v2/groups \
-  -H "Authorization: Bearer ${SMD_JWT}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "label": "compute",
-    "description": "Standard HPC compute nodes",
-    "members": {
-      "ids": ["x1000c0s0b0n0", "x1000c0s0b0n1"]
-    }
-  }' | jq .
-
-# Query the group back from SMD
-curl -sS http://127.0.0.1:27779/hsm/v2/groups/compute \
-  -H "Authorization: Bearer ${SMD_JWT}" | jq .
-```
-
----
-
-## Part 4: Boot Script Service (BSS) & PXE Boot Script Generation
-
-### 4.1 Register the Node and Boot Parameters in BSS
-```bash
-# Register node record in BSS
-curl -sS -X POST http://127.0.0.1:27778/nodes \
-  -H "Authorization: Bearer ${BSS_JWT}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "metadata": {"name": "x1000c0s0b0n0"},
-    "spec": {
-      "xname": "x1000c0s0b0n0",
-      "nid": 1,
-      "bootMac": "00:de:ad:be:ef:01",
-      "role": "Compute"
-    }
-  }' | jq .
-
-# Register kernel, initrd, and kernel cmdline parameters in BSS
-curl -sS -X POST http://127.0.0.1:27778/boot/v1/bootparameters \
-  -H "Authorization: Bearer ${BSS_JWT}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "hosts": ["x1000c0s0b0n0"],
-    "macs": ["00:de:ad:be:ef:01"],
-    "nids": ["1"],
-    "kernel": "http://openchami-localstack-dev:4566/testcluster-boot-images/vmlinuz-6.8",
-    "initrd": "http://openchami-localstack-dev:4566/testcluster-boot-images/initramfs-6.8.img",
-    "params": "console=ttyS0,115200n8 ds=nocloud-net;s=https://testcluster.local/cloud-init/"
-  }' | jq .
-
-# Inspect stored boot parameters
-curl -sS http://127.0.0.1:27778/boot/v1/bootparameters \
-  -H "Authorization: Bearer ${BSS_JWT}" | jq .
-```
-
-### 4.2 Simulate an Unauthenticated Node PXE Boot Request
-```bash
-# Fetch iPXE script by XName
-curl -sS "http://127.0.0.1:27778/boot/v1/bootscript?host=x1000c0s0b0n0"
-
-# Fetch iPXE script by NID
-curl -sS "http://127.0.0.1:27778/boot/v1/bootscript?nid=1"
-
-# Fetch iPXE script by MAC address
-curl -sS "http://127.0.0.1:27778/boot/v1/bootscript?mac=00:de:ad:be:ef:01"
-```
-
----
-
-## Part 5: Cleanup Port-Forwards
+These checks do not contact the BMC or modify the cluster:
 
 ```bash
-kill "$PF_SMD_PID" "$PF_BSS_PID" 2>/dev/null || true
+bash -n ./demo.sh
+bash ./tests/demo-test.sh
 ```
