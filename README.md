@@ -1,167 +1,123 @@
-# OpenCHAMI Operator Live Demo Guide
+# OpenCHAMI Live Demo
 
-This demo discovers the real BMC at `172.24.0.3` using a pre-built Magellan CLI on your workstation, sends its Redfish inventory to the operator-managed SMD, and optionally generates a BSS boot script for a discovered node. It does not reset, power-cycle, or change boot settings on the server.
+Run these blocks in order from the operator checkout, using Bash and a pre-built `magellan` on PATH. The same commands are in [demo.sh](demo.sh).
 
-## Prerequisites
-
-- A pre-built Magellan executable with `scan` and `collect` commands.
-- The OpenCHAMI operator checkout, including its development cluster and minimal control-plane fixture. The default location is `../openchami-operator` relative to this demo repository.
-- `bash`, `make`, `kubectl`, `curl`, `jq`, and the AWS CLI on the workstation.
-- A route from the workstation to `172.24.0.3:443` and a BMC account permitted to read Redfish inventory. The BMC IP is not the compute node's PXE IP or MAC address.
-
-The current operator checkout does not implement the scheduled Magellan discovery pipeline: BMC credentials and SMD authentication are not wired into its CronJob. This guide disables only that in-cluster scheduler and uses the pre-built CLI for discovery. No Magellan build or container image is required.
-
-## Part 1: Set Up the Operator
-
-Run these commands from this demo repository:
+## 1. Deploy the Operator and Services
 
 ```bash
-export OPERATOR_DIR="${OPERATOR_DIR:-$PWD/../openchami-operator}"
-export MAGELLAN_BIN="${MAGELLAN_BIN:-$PWD/../magellan/magellan}"
-export BMC_IP=172.24.0.3
-export BMC_XNAME=x1000c0s0b0
-
-"$MAGELLAN_BIN" version
-"$MAGELLAN_BIN" scan --help
-"$MAGELLAN_BIN" collect --help
-"$MAGELLAN_BIN" send --help
-
-make -C "$OPERATOR_DIR" dev-up
-make -C "$OPERATOR_DIR" build
-make -C "$OPERATOR_DIR" dev-deploy
-```
-
-Set `MAGELLAN_BIN` to your existing executable if it is elsewhere. `BMC_XNAME` is an explicit location assignment for this BMC, not a value inferred from Redfish. Change it to your real cabinet/chassis/slot assignment if appropriate. SMD assigns node XNames under this BMC; the script verifies their UUID and Redfish URI against systems in the current Magellan collection.
-
-Do not delete `testcluster` for an ordinary rerun. A reset removes the operator-managed control plane and its inventory; use `bash ./demo.sh --reset` only when you intentionally want a fresh development environment.
-
-## Part 2: Discover the Real Hardware
-
-Enter the BMC username locally; the script prompts for the password without echoing it. Do not paste credentials into this guide or commit them. Run the script in Bash, not by sourcing it.
-
-```bash
-printf 'BMC username: '
-IFS= read -r BMC_USERNAME
-export BMC_USERNAME
-bash ./demo.sh
-```
-
-The script deploys `testcluster`, waits for `Ready`, checks the S3 bucket, starts SMD/BSS port-forwards, and mints TokenSmith JWTs. It verifies that SMD rejects unauthenticated writes, then uses this discovery flow:
-
-```text
-Magellan scan https://172.24.0.3:443
-  -> Magellan collect (Redfish credentials and BMC XName map)
-  -> HTTP import of unchanged collected inventory (SMD JWT, checked status)
-  -> SMD node and Ethernet inventory
-```
-
-Only that BMC is scanned. Each run uses an isolated temporary cache, so old scan results cannot introduce unrelated hardware. The cache and inventory file are private and removed on exit. Existing SMD/BSS records are not deleted. Collection currently passes credentials using Magellan's CLI flags; avoid shell tracing (`bash -x`), debug logging, and running on a shared workstation where process arguments can be inspected.
-
-The script imports the exact collected BMC payload directly into SMD so a failed HTTP response stops the demo even with older Magellan binaries whose `send` command logs errors but exits successfully. Only HTTP 409 (duplicate registration) triggers a PUT retry for this BMC. Other errors stop before existing SMD inventory is inspected. Reruns do not delete unrelated inventory or BSS records.
-
-The script uses `--insecure` for BMC scan and collection to accommodate a self-signed lab certificate. This bypass applies to the BMC only, not to SMD. For a trusted BMC certificate, remove those flags and use your installed Magellan's CA options as supported by `--help`.
-
-The script prints current Magellan system data alongside verified SMD IDs. Existing same-prefix nodes are excluded unless their endpoint UUID and Redfish URI match this collection. NIC MACs and IPs come from this collection, not old SMD records. It never writes synthetic compute nodes, MAC addresses, NIDs, or node IP addresses. If the BMC exposes multiple nodes, rerun with `NODE_XNAME` set to one of the verified IDs. If no node appears, inspect the Redfish inventory and SMD logs rather than creating a synthetic fallback.
-
-### SMD Rejects Interfaces With No IP
-
-`Invalid CompEthInterface IP Address` can occur when an older SMD importer creates an empty IP mapping for a real Redfish NIC that has no assigned IP. A MAC-only NIC is valid inventory; do not add a dummy IP or discard the NIC to bypass this error.
-
-The local SMD source fixes this in `parseRedfishEndpointDataV2`: it adds an `IPAddressMapping` only when the collected `eth.IP` is non-empty, while retaining the Ethernet interface. Deploy an SMD image containing that fix and confirm the running pod uses it. Redeploying the operator alone does not update a separately built SMD image.
-
-A failed import may partially write records in older SMD versions. The script stops on the error and does not claim those records as successful discovery. Old demo records can remain in SMD but are not selected merely because they share an XName prefix. State, role and NID shown by the SMD API may be assigned defaults or retained metadata, not facts collected from Redfish.
-
-## Part 3: Inspect the Provisioned Control Plane
-
-```bash
-kubectl get openchamicontrolplane testcluster -n default
+make dev-up
+make build
+make dev-deploy
+./bin/ochami-admin describe -f test/fixtures/minimal-controlplane.yaml
+kubectl apply -f test/fixtures/minimal-controlplane.yaml
+kubectl patch openchamicontrolplane testcluster -n default --type=merge \
+  -p '{"spec":{"services":{"magellan":{"enabled":false}}}}'
+kubectl wait --for=jsonpath='{.status.phase}'=Ready \
+  openchamicontrolplane/testcluster -n default --timeout=180s
 kubectl get pods -n openchami-testcluster
-kubectl get openchamicontrolplane testcluster -n default \
-  -o jsonpath='{range .status.conditions[*]}{.type}={.status} ({.reason}): {.message}{"\n"}{end}'
 ```
 
-To inspect SMD after the script exits, start a new port-forward and mint a new token in the same shell:
+Magellan runs locally because the operator's discovery scheduler is not wired yet. Use an SMD image with the empty NIC-IP fix from the previous run.
+
+## 2. Connect and Authenticate
+
+Wait for both port-forwards to print `Forwarding from` before continuing.
 
 ```bash
 kubectl port-forward -n openchami-testcluster svc/smd 27779:27779 &
 PF_SMD_PID=$!
+kubectl port-forward -n openchami-testcluster svc/boot-service 27778:27778 &
+PF_BSS_PID=$!
 
-export SMD_JWT=$(kubectl exec -n openchami-testcluster deploy/tokensmith -- \
+SMD_JWT=$(kubectl exec -n openchami-testcluster deploy/tokensmith -- \
   /usr/local/bin/tokensmith user-token create \
   --subject demo-admin --audience hsm \
   --scopes node:read,node:write,group:read,group:write \
   --key-file /var/lib/tokensmith/keys/private.pem \
   --enable-local-user-mint | tr -d '\r\n')
+BSS_JWT=$(kubectl exec -n openchami-testcluster deploy/tokensmith -- \
+  /usr/local/bin/tokensmith user-token create \
+  --subject demo-admin --audience boot-service \
+  --scopes boot:read,boot:write,node:read,node:write \
+  --key-file /var/lib/tokensmith/keys/private.pem \
+  --enable-local-user-mint | tr -d '\r\n')
+```
 
-curl -fsS http://127.0.0.1:27779/hsm/v2/Inventory/RedfishEndpoints \
+## 3. Discover the BMC and Import Inventory
+
+`x1000c0s0b0` is the location assigned to this BMC, not synthetic hardware.
+
+```bash
+set -euo pipefail
+umask 077
+DEMO_DIR=$(mktemp -d)
+read -r -p 'BMC username: ' BMC_USERNAME
+read -r -s -p 'BMC password: ' BMC_PASSWORD
+printf '\n'
+magellan scan https://172.24.0.3:443 --insecure --cache "$DEMO_DIR/assets.db"
+magellan collect --cache "$DEMO_DIR/assets.db" --insecure \
+  --username "$BMC_USERNAME" --password "$BMC_PASSWORD" \
+  --bmc-id-map '{"map_key":"bmc-ip-addr","id_map":{"172.24.0.3":"x1000c0s0b0"}}' \
+  --output-format json --output-file "$DEMO_DIR/inventory.json"
+jq '.[].Systems' "$DEMO_DIR/inventory.json"
+jq -c '.[]' "$DEMO_DIR/inventory.json" | while IFS= read -r endpoint; do
+  curl -fsS -X POST http://127.0.0.1:27779/hsm/v2/Inventory/RedfishEndpoints \
+    -H "Authorization: Bearer $SMD_JWT" -H 'Content-Type: application/json' \
+    -d "$endpoint"
+done
+```
+
+## 4. Show the Node in SMD and Its Power Status
+
+Select the SMD node by its collected UUID, then add it to a hardware group and read its power status.
+
+```bash
+curl -fsS http://127.0.0.1:27779/hsm/v2/Inventory/ComponentEndpoints \
+  -H "Authorization: Bearer $SMD_JWT" > "$DEMO_DIR/endpoints.json"
+NODE_XNAME=$(jq -er --slurpfile inventory "$DEMO_DIR/inventory.json" '
+  [.ComponentEndpoints[] | . as $endpoint |
+    select(.RfEndpointID == $inventory[0][0].ID) |
+    select(any($inventory[0][0].Systems[]; .uuid == $endpoint.UUID)) | .ID] | unique |
+  if length == 1 then .[0] else error("Choose a node from the collected systems") end
+' "$DEMO_DIR/endpoints.json")
+curl -fsS "http://127.0.0.1:27779/hsm/v2/State/Components/$NODE_XNAME" \
   -H "Authorization: Bearer $SMD_JWT" | jq .
-curl -fsS http://127.0.0.1:27779/hsm/v2/State/Components \
+jq -nc --arg node "$NODE_XNAME" \
+  '{label:"compute",description:"Discovered compute node",members:{ids:[$node]}}' |
+  curl -fsS -X POST http://127.0.0.1:27779/hsm/v2/groups \
+    -H "Authorization: Bearer $SMD_JWT" -H 'Content-Type: application/json' -d @-
+curl -fsS http://127.0.0.1:27779/hsm/v2/groups/compute \
   -H "Authorization: Bearer $SMD_JWT" | jq .
-curl -fsS http://127.0.0.1:27779/hsm/v2/Inventory/EthernetInterfaces \
-  -H "Authorization: Bearer $SMD_JWT" | jq .
-
-kill "$PF_SMD_PID"
-unset SMD_JWT
+NODE_UUID=$(jq -r --arg node "$NODE_XNAME" \
+  '.ComponentEndpoints[] | select(.ID == $node) | .UUID' "$DEMO_DIR/endpoints.json")
+magellan power "$NODE_UUID" --inventory-file "$DEMO_DIR/inventory.json" \
+  --username "$BMC_USERNAME" --password "$BMC_PASSWORD" --insecure
+unset BMC_PASSWORD
 ```
 
-Wait for kubectl's `Forwarding from ...` message before issuing the curl requests.
+## 5. Generate a BSS Boot Script
 
-## Part 4: Optional Real Boot Artifacts and BSS Script
-
-Discovery does not require boot artifacts. To also configure BSS, provide an actual kernel, matching initrd, and kernel command line for your node. Do not use the old dummy payloads.
-
-LocalStack remains a development S3 store. You may upload real files to the provisioned bucket:
+Use the discovered PXE NIC MAC and real kernel/initrd URLs reachable by the node. This generates a script; it does not reboot the server.
 
 ```bash
-export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 AWS_PAGER=""
-
-printf 'Path to kernel: '
-IFS= read -r KERNEL_FILE
-printf 'Path to initrd: '
-IFS= read -r INITRD_FILE
-aws --endpoint-url=http://127.0.0.1:4566 s3 cp "$KERNEL_FILE" s3://testcluster-boot-images/vmlinuz
-aws --endpoint-url=http://127.0.0.1:4566 s3 cp "$INITRD_FILE" s3://testcluster-boot-images/initramfs.img
-aws --endpoint-url=http://127.0.0.1:4566 s3 ls s3://testcluster-boot-images/
+jq '.[].Systems[].ethernet_interfaces' "$DEMO_DIR/inventory.json"
+read -r -p 'PXE MAC from the discovered interfaces: ' BOOT_MAC
+read -r -p 'Node-reachable kernel URL: ' KERNEL_URL
+read -r -p 'Node-reachable initrd URL: ' INITRD_URL
+read -r -p 'Kernel command line: ' BOOT_PARAMS
+jq -nc --arg node "$NODE_XNAME" --arg mac "$BOOT_MAC" \
+  --arg kernel "$KERNEL_URL" --arg initrd "$INITRD_URL" --arg params "$BOOT_PARAMS" \
+  '{hosts:[$node],macs:[$mac],kernel:$kernel,initrd:$initrd,params:$params}' |
+  curl -fsS -X POST http://127.0.0.1:27778/boot/v1/bootparameters \
+    -H "Authorization: Bearer $BSS_JWT" -H 'Content-Type: application/json' -d @-
+curl -fsS "http://127.0.0.1:27778/boot/v1/bootscript?host=$NODE_XNAME"
+curl -fsS "http://127.0.0.1:27778/boot/v1/bootscript?mac=$BOOT_MAC"
 ```
 
-Set the artifact URLs to addresses reachable from the compute node's PXE network, with permission to download the objects. `127.0.0.1`, the Kind-only `openchami-localstack-dev` hostname, and a workstation-only port-forward are not valid artifact addresses for the physical node. Uploading files does not establish external routing or anonymous object access.
-
-The prompts below avoid embedding invented network details:
+## 6. Cleanup
 
 ```bash
-printf 'Discovered node XName: '
-IFS= read -r NODE_XNAME
-printf 'Discovered PXE NIC MAC (not the BMC MAC): '
-IFS= read -r BOOT_MAC
-printf 'Node-reachable kernel URL: '
-IFS= read -r BOOT_KERNEL_URL
-printf 'Node-reachable initrd URL: '
-IFS= read -r BOOT_INITRD_URL
-printf 'Kernel command line for this node: '
-IFS= read -r BOOT_PARAMS
-export NODE_XNAME BOOT_MAC BOOT_KERNEL_URL BOOT_INITRD_URL BOOT_PARAMS
-
-bash ./demo.sh
-```
-
-The script verifies the chosen node and MAC against SMD inventory, registers boot parameters with those discovered identifiers, then fetches unauthenticated iPXE scripts by host and MAC. It does not assume a NID or overwrite a node's discovered state/role. Multiple NICs require an explicit PXE MAC choice; a single reported NIC is selected automatically if `BOOT_MAC` is unset.
-
-This demonstrates discovery and script generation, not a complete physical PXE boot. Actually booting requires DHCP/iPXE configuration, a node-reachable BSS endpoint, accessible artifacts, and any needed metadata service. Confirm those independently before changing boot order or powering the server.
-
-## Part 5: Cleanup
-
-The script stops its own port-forwards and removes temporary discovery files on exit. It leaves the control plane and discovered inventory intact. Clear local optional configuration after the demo:
-
-```bash
-unset BMC_USERNAME BMC_PASSWORD SMD_JWT BSS_JWT
-unset NODE_XNAME BOOT_MAC BOOT_KERNEL_URL BOOT_INITRD_URL BOOT_PARAMS
-```
-
-## Offline Validation
-
-These checks do not contact the BMC or modify the cluster:
-
-```bash
-bash -n ./demo.sh
-bash ./tests/demo-test.sh
+kill "$PF_SMD_PID" "$PF_BSS_PID"
+unset SMD_JWT BSS_JWT BMC_PASSWORD
+rm -r "$DEMO_DIR"
 ```
