@@ -2,6 +2,8 @@
 
 Run these blocks in order from the operator checkout, using Bash and a pre-built `magellan` on PATH. The same commands are in [demo.sh](demo.sh).
 
+Run the script from that checkout with `bash /path/to/operator-demo/demo.sh`, or set `OPERATOR_DIR=/path/to/openchami-operator` explicitly.
+
 ## 1. Deploy the Operator and Services
 
 ```bash
@@ -9,7 +11,7 @@ make dev-up
 make build
 make dev-deploy
 ./bin/ochami-admin describe -f test/fixtures/minimal-controlplane.yaml
-kubectl apply -f test/fixtures/minimal-controlplane.yaml
+kubectl apply -n default -f test/fixtures/minimal-controlplane.yaml
 kubectl patch openchamicontrolplane testcluster -n default --type=merge \
   -p '{"spec":{"services":{"magellan":{"enabled":false}}}}'
 kubectl wait --for=jsonpath='{.status.phase}'=Ready \

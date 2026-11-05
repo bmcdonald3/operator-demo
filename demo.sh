@@ -3,16 +3,23 @@
 # SPDX-License-Identifier: MIT
 
 set -euo pipefail
-cd "${OPERATOR_DIR:-$(dirname "${BASH_SOURCE[0]}")/../openchami-operator}"
+cd "${OPERATOR_DIR:-$PWD}"
+[[ -f test/fixtures/minimal-controlplane.yaml ]] || {
+  printf 'Run this script from the operator checkout, or set OPERATOR_DIR to its path.\n' >&2
+  exit 1
+}
 MAGELLAN_BIN="${MAGELLAN_BIN:-magellan}"
 umask 077
 DEMO_DIR=$(mktemp -d)
 
+printf 'Deploying operator from %s\n' "$PWD"
 make dev-up
 make build
 make dev-deploy
+printf '\nPreviewing the control plane\n'
 ./bin/ochami-admin describe -f test/fixtures/minimal-controlplane.yaml
-kubectl apply -f test/fixtures/minimal-controlplane.yaml
+printf '\nApplying the control plane\n'
+kubectl apply -n default -f test/fixtures/minimal-controlplane.yaml
 kubectl patch openchamicontrolplane testcluster -n default --type=merge \
   -p '{"spec":{"services":{"magellan":{"enabled":false}}}}'
 kubectl wait --for=jsonpath='{.status.phase}'=Ready \
