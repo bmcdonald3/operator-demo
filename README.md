@@ -78,7 +78,7 @@ curl -fsS http://127.0.0.1:27779/hsm/v2/Inventory/ComponentEndpoints \
   -H "Authorization: Bearer $SMD_JWT" > "$DEMO_DIR/endpoints.json"
 NODE_XNAME=$(jq -er --slurpfile inventory "$DEMO_DIR/inventory.json" '
   [.ComponentEndpoints[] | . as $endpoint |
-    select(.RfEndpointID == $inventory[0][0].ID) |
+    select(.RedfishEndpointID == $inventory[0][0].ID) |
     select(any($inventory[0][0].Systems[]; .uuid == $endpoint.UUID)) | .ID] | unique |
   if length == 1 then .[0] else error("Choose a node from the collected systems") end
 ' "$DEMO_DIR/endpoints.json")
@@ -99,14 +99,21 @@ unset BMC_PASSWORD
 
 ## 5. Generate a BSS Boot Script
 
-Use the discovered PXE NIC MAC and real kernel/initrd URLs reachable by the node. This generates a script; it does not reboot the server.
+Register the discovered node in BSS using its first reported NIC and Alpine Linux netboot files. This generates a script; it does not reboot the server or configure DHCP.
 
 ```bash
-jq '.[].Systems[].ethernet_interfaces' "$DEMO_DIR/inventory.json"
-read -r -p 'PXE MAC from the discovered interfaces: ' BOOT_MAC
-read -r -p 'Node-reachable kernel URL: ' KERNEL_URL
-read -r -p 'Node-reachable initrd URL: ' INITRD_URL
-read -r -p 'Kernel command line: ' BOOT_PARAMS
+BOOT_MAC=$(jq -er --arg uuid "$NODE_UUID" '
+  [.[].Systems[] | select(.uuid == $uuid) | .ethernet_interfaces[] |
+    .mac | ascii_downcase | gsub("-"; ":") |
+    select(. != "ff:ff:ff:ff:ff:ff" and . != "00:00:00:00:00:00")][0]
+' "$DEMO_DIR/inventory.json")
+KERNEL_URL=https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/netboot/vmlinuz-lts
+INITRD_URL=https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/netboot/initramfs-lts
+BOOT_PARAMS='ip=dhcp alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v3.22/main modloop=https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/netboot/modloop-lts'
+jq -nc --arg node "$NODE_XNAME" --arg mac "$BOOT_MAC" \
+  '{apiVersion:"boot.openchami.io/v1",kind:"Node",metadata:{name:$node},spec:{xname:$node,bootMac:$mac}}' |
+  curl -fsS -X POST http://127.0.0.1:27778/nodes \
+    -H "Authorization: Bearer $BSS_JWT" -H 'Content-Type: application/json' -d @-
 jq -nc --arg node "$NODE_XNAME" --arg mac "$BOOT_MAC" \
   --arg kernel "$KERNEL_URL" --arg initrd "$INITRD_URL" --arg params "$BOOT_PARAMS" \
   '{hosts:[$node],macs:[$mac],kernel:$kernel,initrd:$initrd,params:$params}' |
