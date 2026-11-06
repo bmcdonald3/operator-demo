@@ -1,8 +1,23 @@
 # OpenCHAMI Live Demo
 
-Run these blocks in order from the operator checkout, using Bash and a pre-built `magellan` on PATH. The same commands are in [demo.sh](demo.sh).
+## Run the Demo
 
-Run the script from that checkout with `bash /path/to/operator-demo/demo.sh`, or set `OPERATOR_DIR=/path/to/openchami-operator` explicitly.
+From the operator checkout, with a pre-built `magellan` on PATH:
+
+```bash
+# First run: deploy and discover.
+bash /path/to/operator-demo/demo.sh --setup --refresh
+
+# Repeat: no rebuild, rescan, port cleanup, or readiness prompts.
+bash /path/to/operator-demo/demo.sh
+
+# Collect fresh hardware inventory when needed.
+bash /path/to/operator-demo/demo.sh --refresh
+```
+
+Use `--setup` again only when rebuilding/redeploying. Set `OPERATOR_DIR` if running setup from another directory. The script chooses free local ports, stops only its own forwards, and updates existing demo records. Collected inventory is cached privately under `~/.cache/openchami-operator-demo/172.24.0.3` (or `$XDG_CACHE_HOME`); repeated runs display the saved power state, not a live power query. BMC credentials are requested only for collection and are not saved by the script.
+
+The commands below are the manual walkthrough, not required when running the script.
 
 ## 1. Deploy the Operator and Services
 
@@ -65,9 +80,19 @@ magellan collect --cache "$DEMO_DIR/assets.db" --insecure \
   --output-format json --output-file "$DEMO_DIR/inventory.json"
 jq '.[].Systems' "$DEMO_DIR/inventory.json"
 jq -c '.[]' "$DEMO_DIR/inventory.json" | while IFS= read -r endpoint; do
-  curl -fsS -X POST http://127.0.0.1:27779/hsm/v2/Inventory/RedfishEndpoints \
+  HTTP_CODE=$(curl -sS -o "$DEMO_DIR/import-response.json" -w '%{http_code}' \
+    -X POST http://127.0.0.1:27779/hsm/v2/Inventory/RedfishEndpoints \
     -H "Authorization: Bearer $SMD_JWT" -H 'Content-Type: application/json' \
-    -d "$endpoint"
+    -d "$endpoint")
+  case "$HTTP_CODE" in
+    2??) cat "$DEMO_DIR/import-response.json" ;;
+    409)
+      ENDPOINT_ID=$(jq -er '.ID' <<< "$endpoint")
+      curl -fsS -X PUT "http://127.0.0.1:27779/hsm/v2/Inventory/RedfishEndpoints/$ENDPOINT_ID" \
+        -H "Authorization: Bearer $SMD_JWT" -H 'Content-Type: application/json' -d "$endpoint"
+      ;;
+    *) cat "$DEMO_DIR/import-response.json" >&2; exit 1 ;;
+  esac
 done
 ```
 
