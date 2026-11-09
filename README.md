@@ -8,7 +8,7 @@ From the operator checkout:
 bash /path/to/operator-demo/demo-fresh.sh
 ```
 
-This deletes `testcluster` and its namespace, including namespaced demo data, rebuilds/deploys the operator, collects fresh Magellan inventory from `172.24.0.3`, and prints BSS iPXE scripts. It registers directly in BSS without writing SMD inventory. It leaves Kind, Vault, and LocalStack in place and does not reboot the server. No cached inventory, retries, or rerun checks. The existing [demo.sh](demo.sh) remains available for fast reruns.
+The script prints each demo command and waits for Enter before running it; Ctrl-C stops the demo. This gives you time to explain each step. BMC passwords are entered without echoing. It deletes `testcluster` and its namespace, including namespaced demo data, rebuilds/deploys the operator, collects fresh Magellan inventory from `172.24.0.3`, and prints BSS iPXE scripts. It registers directly in BSS without writing SMD inventory. It leaves Kind, Vault, and LocalStack in place and does not reboot the server. The existing [demo.sh](demo.sh) remains available for fast reruns.
 
 ## Run the Demo
 
