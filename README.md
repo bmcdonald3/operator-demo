@@ -4,6 +4,30 @@
 
 This walkthrough follows the working **Magellan -> BSS** path. It does not import inventory into SMD, configure DHCP, or reboot the physical server.
 
+## Why This Is Useful
+
+Provisioning a bare-metal server starts with two questions: **what hardware is this, and what should it boot?** This tutorial connects those questions without requiring an operating system to be installed on the server first.
+
+Magellan reads the BMC to discover the server's UUID, model, serial number, network interfaces, and reported power state. BSS associates a selected NIC with a boot configuration: the kernel, initial RAM filesystem, and kernel arguments. A request identifying that node then receives an iPXE script describing how to load the chosen operating system.
+
+In a larger provisioning workflow, hardware inventory can help you identify machines, check their capabilities, and choose which configuration to assign. Boot configuration can be managed centrally rather than entered separately on every server. This demo shows one small part of that workflow using a real server and Alpine Linux boot files.
+
+### Who This Helps
+
+- **HPC and bare-metal administrators** evaluating how OpenCHAMI discovers machines and supplies boot instructions.
+- **Platform engineers** exploring how an operator-managed control plane connects physical hardware to service APIs.
+- **Developers and integrators** learning the boundary between BMC discovery, node registration, and boot configuration before automating those steps.
+
+### What to Look For
+
+By the end, you should be able to follow one server through three concrete results:
+
+1. **Discovered inventory:** the model, serial number, UUID, and MAC addresses come from your actual BMC, not a sample node definition.
+2. **A registered BSS node:** the selected discovered MAC is associated with a node name and a chosen boot configuration.
+3. **Generated boot instructions:** requests by node name and MAC produce iPXE scripts for that same node, containing the configured Alpine kernel and initrd URLs and a `boot` instruction.
+
+That demonstrates the connection from hardware discovery to boot-script generation. It does **not** prove that the server has booted: physical PXE boot also needs network reachability, DHCP/iPXE setup, and access to the boot files. Those are outside this tutorial.
+
 ## Present the Demo
 
 Run [demo-fresh.sh](demo-fresh.sh) from the operator checkout. It displays each command and waits for Enter so you can explain the step before executing it. Ctrl-C stops the demo.
