@@ -2,7 +2,7 @@
 
 **Discover a real server, then generate its boot script.** The operator provides the services, Magellan reads the BMC at `172.24.0.3`, and Boot Script Service (BSS) turns the discovered node and boot configuration into iPXE instructions.
 
-This walkthrough follows the working **Magellan -> BSS** path. It does not import inventory into SMD, configure DHCP, or reboot the physical server.
+The guided script follows **Magellan -> SMD post/query -> BSS**. It prints SMD's write response and queries the component endpoint matching the discovered UUID. Known NIC validation errors in the SMD write do not block the BSS steps; the response remains visible rather than being presented as a successful full import. The manual blocks below describe the direct Magellan-to-BSS path. Neither path configures DHCP or reboots the physical server.
 
 ## Why This Is Useful
 

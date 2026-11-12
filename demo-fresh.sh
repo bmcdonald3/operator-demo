@@ -39,12 +39,14 @@ run_step 'kubectl get pods -n openchami-testcluster' kubectl get pods -n opencha
 printf '\n=== Connect to BSS ===\n'
 start_forward() {
   exec 3< <(exec kubectl port-forward --address 127.0.0.1 \
-    -n openchami-testcluster svc/boot-service :27778 2>&1)
+    -n openchami-testcluster "svc/$1" ":$2" 2>&1)
   PF_PID=$!
   IFS= read -r FORWARD_LINE <&3
 }
-run_step 'kubectl port-forward --address 127.0.0.1 -n openchami-testcluster svc/boot-service :27778' start_forward
-trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
+run_step 'kubectl port-forward --address 127.0.0.1 -n openchami-testcluster svc/boot-service :27778' start_forward boot-service 27778
+PF_BSS_PID=$PF_PID
+PF_SMD_PID=''
+trap 'kill "$PF_BSS_PID" "${PF_SMD_PID:-}" 2>/dev/null || true' EXIT
 run_step 'printf "%s\\n" "$FORWARD_LINE"' printf '%s\n' "$FORWARD_LINE"
 BSS_URL=$(run_step "sed -n 's/^Forwarding from \\(http:\\/\\/\\)\\{0,1\\}\\(127\\.0\\.0\\.1:[0-9]*\\) ->.*/http:\\/\\/\\2/p' <<< \"\$FORWARD_LINE\"" \
   sed -n 's/^Forwarding from \(http:\/\/\)\{0,1\}\(127\.0\.0\.1:[0-9]*\) ->.*/http:\/\/\2/p' \
@@ -59,9 +61,25 @@ run_step 'kubectl exec -n openchami-testcluster deploy/tokensmith -- /usr/local/
 BSS_JWT=$(tr -d '\r\n' < "$DEMO_DIR/token.txt")
 rm "$DEMO_DIR/token.txt"
 
+printf '\n=== Connect to SMD ===\n'
+run_step 'kubectl port-forward --address 127.0.0.1 -n openchami-testcluster svc/smd :27779' start_forward smd 27779
+PF_SMD_PID=$PF_PID
+printf '%s\n' "$FORWARD_LINE"
+SMD_URL=$(printf '%s\n' "$FORWARD_LINE" |
+  sed -n 's/^Forwarding from \(127\.0\.0\.1:[0-9]*\) ->.*/http:\/\/\1/p')
+run_step 'kubectl exec -n openchami-testcluster deploy/tokensmith -- /usr/local/bin/tokensmith user-token create --subject demo-admin --audience hsm --scopes node:read,node:write,group:read,group:write --key-file /var/lib/tokensmith/keys/private.pem --enable-local-user-mint > "$DEMO_DIR/smd-token.txt"' \
+  kubectl exec -n openchami-testcluster deploy/tokensmith -- \
+  /usr/local/bin/tokensmith user-token create \
+  --subject demo-admin --audience hsm \
+  --scopes node:read,node:write,group:read,group:write \
+  --key-file /var/lib/tokensmith/keys/private.pem \
+  --enable-local-user-mint > "$DEMO_DIR/smd-token.txt"
+SMD_JWT=$(tr -d '\r\n' < "$DEMO_DIR/smd-token.txt")
+rm "$DEMO_DIR/smd-token.txt"
+
 printf '\n=== Discover 172.24.0.3 with Magellan ===\n'
-BMC_USERNAME" read -r -p 'BMC username: ' BMC_USERNAME
-BMC_PASSWORD" read -r -s -p 'BMC password: ' BMC_PASSWORD
+read -r -p 'BMC username: ' BMC_USERNAME
+read -r -s -p 'BMC password: ' BMC_PASSWORD
 printf '\n'
 run_step 'magellan scan https://172.24.0.3:443 --insecure --cache "$DEMO_DIR/assets.db"' \
   "$MAGELLAN_BIN" scan https://172.24.0.3:443 --insecure --cache "$DEMO_DIR/assets.db"
@@ -73,10 +91,28 @@ run_step "magellan collect --cache \"\$DEMO_DIR/assets.db\" --insecure --usernam
 unset BMC_PASSWORD
 SYSTEM_FILTER='.[0].Systems | length > 0'
 jq -e "$SYSTEM_FILTER" "$DEMO_DIR/inventory.json" > /dev/null
+printf '\n=== Hardware collected from the BMC by Magellan ===\n'
 jq '.[].Systems' "$DEMO_DIR/inventory.json"
 NODE_XNAME=$(jq -r '.[0].ID + "n0"' "$DEMO_DIR/inventory.json")
 MAC_FILTER='.[0].Systems[0].ethernet_interfaces[0].mac | ascii_downcase | gsub("-"; ":")'
 BOOT_MAC=$(jq -r "$MAC_FILTER" "$DEMO_DIR/inventory.json")
+
+printf '\n=== Send discovered inventory to SMD ===\n'
+jq -c '.[0]' "$DEMO_DIR/inventory.json" > "$DEMO_DIR/smd-endpoint.json"
+printf 'The HTTP response is shown below. SMD may report NIC validation errors while storing the component endpoint; the BSS demo continues.\n'
+run_step 'curl -sS -i -X POST "$SMD_URL/hsm/v2/Inventory/RedfishEndpoints" -H "Authorization: Bearer $SMD_JWT" -H "Content-Type: application/json" --data-binary @"$DEMO_DIR/smd-endpoint.json"' \
+  curl -sS -i -X POST "$SMD_URL/hsm/v2/Inventory/RedfishEndpoints" \
+  -H "Authorization: Bearer $SMD_JWT" -H 'Content-Type: application/json' \
+  --data-binary "@$DEMO_DIR/smd-endpoint.json"
+
+printf '\n=== Hardware retrieved from SMD ===\n'
+run_step 'curl -fsS "$SMD_URL/hsm/v2/Inventory/ComponentEndpoints" -H "Authorization: Bearer $SMD_JWT" > "$DEMO_DIR/smd-endpoints.json"' \
+  curl -fsS "$SMD_URL/hsm/v2/Inventory/ComponentEndpoints" \
+  -H "Authorization: Bearer $SMD_JWT" > "$DEMO_DIR/smd-endpoints.json"
+NODE_UUID=$(jq -r '.[0].Systems[0].uuid' "$DEMO_DIR/inventory.json")
+jq --arg uuid "$NODE_UUID" --arg bmc "$(jq -r '.[0].ID' "$DEMO_DIR/inventory.json")" \
+  '{ComponentEndpoints: [.ComponentEndpoints[] | select(.UUID == $uuid and .RedfishEndpointID == $bmc)]}' \
+  "$DEMO_DIR/smd-endpoints.json"
 
 printf '\n=== Register the discovered node in BSS ===\n'
 jq -nc --arg node "$NODE_XNAME" --arg mac "$BOOT_MAC" \
