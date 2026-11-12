@@ -33,13 +33,7 @@ run_step 'kubectl apply -n default -f test/fixtures/minimal-controlplane.yaml' \
 run_step "kubectl patch openchamicontrolplane testcluster -n default --type=merge -p '{\"spec\":{\"services\":{\"magellan\":{\"enabled\":false}}}}'" \
   kubectl patch openchamicontrolplane testcluster -n default --type=merge \
   -p '{"spec":{"services":{"magellan":{"enabled":false}}}}'
-run_step "kubectl wait --for=jsonpath='{.status.phase}'=Ready openchamicontrolplane/testcluster -n default --timeout=300s" \
-  kubectl wait --for=jsonpath='{.status.phase}'=Ready \
-  openchamicontrolplane/testcluster -n default --timeout=300s
-run_step 'kubectl rollout status deployment/boot-service -n openchami-testcluster --timeout=180s' \
-  kubectl rollout status deployment/boot-service -n openchami-testcluster --timeout=180s
-run_step 'kubectl rollout status deployment/tokensmith -n openchami-testcluster --timeout=180s' \
-  kubectl rollout status deployment/tokensmith -n openchami-testcluster --timeout=180s
+run_step 'kubectl get pods -n openchami-testcluster' kubectl get pods -n openchami-testcluster
 run_step 'kubectl get pods -n openchami-testcluster' kubectl get pods -n openchami-testcluster
 
 printf '\n=== Connect to BSS ===\n'
@@ -67,8 +61,8 @@ BSS_JWT=$(run_step "tr -d '\\r\\n' < \"\$DEMO_DIR/token.txt\"" \
 rm "$DEMO_DIR/token.txt"
 
 printf '\n=== Discover 172.24.0.3 with Magellan ===\n'
-run_step "read -r -p 'BMC username: ' BMC_USERNAME" read -r -p 'BMC username: ' BMC_USERNAME
-run_step "read -r -s -p 'BMC password: ' BMC_PASSWORD" read -r -s -p 'BMC password: ' BMC_PASSWORD
+BMC_USERNAME" read -r -p 'BMC username: ' BMC_USERNAME
+BMC_PASSWORD" read -r -s -p 'BMC password: ' BMC_PASSWORD
 printf '\n'
 run_step 'magellan scan https://172.24.0.3:443 --insecure --cache "$DEMO_DIR/assets.db"' \
   "$MAGELLAN_BIN" scan https://172.24.0.3:443 --insecure --cache "$DEMO_DIR/assets.db"
@@ -78,12 +72,16 @@ run_step "magellan collect --cache \"\$DEMO_DIR/assets.db\" --insecure --usernam
   --bmc-id-map '{"map_key":"bmc-ip-addr","id_map":{"172.24.0.3":"x1000c0s0b0"}}' \
   --output-format json --output-file "$DEMO_DIR/inventory.json"
 run_step 'unset BMC_PASSWORD' unset BMC_PASSWORD
+SYSTEM_FILTER='.[0].Systems | length > 0'
+run_step "jq -e '$SYSTEM_FILTER' \"\$DEMO_DIR/inventory.json\"" \
+  jq -e "$SYSTEM_FILTER" "$DEMO_DIR/inventory.json" > /dev/null
 run_step 'jq .[].Systems "$DEMO_DIR/inventory.json"' \
   jq '.[].Systems' "$DEMO_DIR/inventory.json"
 NODE_XNAME=$(run_step "jq -r '.[0].ID + \"n0\"' \"\$DEMO_DIR/inventory.json\"" \
   jq -r '.[0].ID + "n0"' "$DEMO_DIR/inventory.json")
-BOOT_MAC=$(run_step "jq -r '.[0].Systems[0].ethernet_interfaces[0].mac | ascii_downcase | gsub(\"-\"; \":\")' \"\$DEMO_DIR/inventory.json\"" \
-  jq -r '.[0].Systems[0].ethernet_interfaces[0].mac | ascii_downcase | gsub("-"; ":")' \
+MAC_FILTER='.[0].Systems[0].ethernet_interfaces[0].mac | ascii_downcase | gsub("-"; ":")'
+BOOT_MAC=$(run_step "jq -r '$MAC_FILTER' \"\$DEMO_DIR/inventory.json\"" \
+  jq -r "$MAC_FILTER" \
   "$DEMO_DIR/inventory.json")
 
 printf '\n=== Register the discovered node in BSS ===\n'
