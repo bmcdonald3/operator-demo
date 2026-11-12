@@ -12,7 +12,7 @@ run_step() {
   local command_text="$1"
   shift
   printf '\n$ %s\n' "$command_text" >&2
-  IFS= read -r -p 'Press Enter to run this command (Ctrl-C to stop): ' _ </dev/tty
+  IFS= read -r -p ' ' _ </dev/tty
   "$@"
 }
 
