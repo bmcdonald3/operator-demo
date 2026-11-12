@@ -79,11 +79,6 @@ kubectl delete namespace openchami-testcluster --ignore-not-found --wait=true
 kubectl apply -n default -f test/fixtures/minimal-controlplane.yaml
 kubectl patch openchamicontrolplane testcluster -n default --type=merge \
   -p '{"spec":{"services":{"magellan":{"enabled":false}}}}'
-kubectl wait --for=jsonpath='{.status.phase}'=Ready \
-  openchamicontrolplane/testcluster -n default --timeout=300s
-kubectl rollout status deployment/boot-service -n openchami-testcluster --timeout=180s
-kubectl rollout status deployment/tokensmith -n openchami-testcluster --timeout=180s
-kubectl get pods -n openchami-testcluster
 ```
 
 </details>
@@ -164,7 +159,6 @@ BSS_JWT=$(kubectl exec -n openchami-testcluster deploy/tokensmith -- \
 ```bash
 IFS= read -r -p 'BMC username: ' BMC_USERNAME
 IFS= read -r -s -p 'BMC password: ' BMC_PASSWORD
-printf '\n'
 magellan scan https://172.24.0.3:443 --insecure --cache "$DEMO_DIR/assets.db"
 magellan collect --cache "$DEMO_DIR/assets.db" --insecure \
   --username "$BMC_USERNAME" --password "$BMC_PASSWORD" \
