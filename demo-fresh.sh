@@ -33,22 +33,22 @@ run_step 'kubectl apply -n default -f test/fixtures/minimal-controlplane.yaml' \
 run_step "kubectl patch openchamicontrolplane testcluster -n default --type=merge -p '{\"spec\":{\"services\":{\"magellan\":{\"enabled\":false}}}}'" \
   kubectl patch openchamicontrolplane testcluster -n default --type=merge \
   -p '{"spec":{"services":{"magellan":{"enabled":false}}}}'
-run_step 'kubectl get pods -n openchami-testcluster' kubectl get pods -n openchami-testcluster
+kubectl wait --for=jsonpath='{.status.phase}'=Ready \
+  openchamicontrolplane/testcluster -n default --timeout=300s
 run_step 'kubectl get pods -n openchami-testcluster' kubectl get pods -n openchami-testcluster
 
-printf '\n=== Connect to BSS ===\n'
+printf '\nConnecting to the demo services...\n'
 start_forward() {
   exec 3< <(exec kubectl port-forward --address 127.0.0.1 \
     -n openchami-testcluster "svc/$1" ":$2" 2>&1)
   PF_PID=$!
   IFS= read -r FORWARD_LINE <&3
 }
-run_step 'kubectl port-forward --address 127.0.0.1 -n openchami-testcluster svc/boot-service :27778' start_forward boot-service 27778
+start_forward boot-service 27778
 PF_BSS_PID=$PF_PID
 PF_SMD_PID=''
 trap 'kill "$PF_BSS_PID" "${PF_SMD_PID:-}" 2>/dev/null || true' EXIT
-run_step 'printf "%s\\n" "$FORWARD_LINE"' printf '%s\n' "$FORWARD_LINE"
-BSS_URL=$(run_step "sed -n 's/^Forwarding from \\(http:\\/\\/\\)\\{0,1\\}\\(127\\.0\\.0\\.1:[0-9]*\\) ->.*/http:\\/\\/\\2/p' <<< \"\$FORWARD_LINE\"" \
+BSS_URL=$(
   sed -n 's/^Forwarding from \(http:\/\/\)\{0,1\}\(127\.0\.0\.1:[0-9]*\) ->.*/http:\/\/\2/p' \
   <<< "$FORWARD_LINE")
 run_step 'kubectl exec -n openchami-testcluster deploy/tokensmith -- /usr/local/bin/tokensmith user-token create --subject demo-admin --audience boot-service --scopes boot:read,boot:write,node:read,node:write --key-file /var/lib/tokensmith/keys/private.pem --enable-local-user-mint > "$DEMO_DIR/token.txt"' \
@@ -61,10 +61,8 @@ run_step 'kubectl exec -n openchami-testcluster deploy/tokensmith -- /usr/local/
 BSS_JWT=$(tr -d '\r\n' < "$DEMO_DIR/token.txt")
 rm "$DEMO_DIR/token.txt"
 
-printf '\n=== Connect to SMD ===\n'
-run_step 'kubectl port-forward --address 127.0.0.1 -n openchami-testcluster svc/smd :27779' start_forward smd 27779
+start_forward smd 27779
 PF_SMD_PID=$PF_PID
-printf '%s\n' "$FORWARD_LINE"
 SMD_URL=$(printf '%s\n' "$FORWARD_LINE" |
   sed -n 's/^Forwarding from \(127\.0\.0\.1:[0-9]*\) ->.*/http:\/\/\1/p')
 run_step 'kubectl exec -n openchami-testcluster deploy/tokensmith -- /usr/local/bin/tokensmith user-token create --subject demo-admin --audience hsm --scopes node:read,node:write,group:read,group:write --key-file /var/lib/tokensmith/keys/private.pem --enable-local-user-mint > "$DEMO_DIR/smd-token.txt"' \
@@ -81,8 +79,8 @@ printf '\n=== Discover 172.24.0.3 with Magellan ===\n'
 read -r -p 'BMC username: ' BMC_USERNAME
 read -r -s -p 'BMC password: ' BMC_PASSWORD
 printf '\n'
-run_step 'magellan scan https://172.24.0.3:443 --insecure --cache "$DEMO_DIR/assets.db"' \
-  "$MAGELLAN_BIN" scan https://172.24.0.3:443 --insecure --cache "$DEMO_DIR/assets.db"
+run_step 'magellan scan https://172.24.0.3:443 --insecure --cache "$DEMO_DIR/assets.db" --output-format json' \
+  "$MAGELLAN_BIN" scan https://172.24.0.3:443 --insecure --cache "$DEMO_DIR/assets.db" --output-format json
 run_step "magellan collect --cache \"\$DEMO_DIR/assets.db\" --insecure --username \"\$BMC_USERNAME\" --password \"\$BMC_PASSWORD\" --bmc-id-map '{\"map_key\":\"bmc-ip-addr\",\"id_map\":{\"172.24.0.3\":\"x1000c0s0b0\"}}' --output-format json --output-file \"\$DEMO_DIR/inventory.json\"" \
   "$MAGELLAN_BIN" collect --cache "$DEMO_DIR/assets.db" --insecure \
   --username "$BMC_USERNAME" --password "$BMC_PASSWORD" \
