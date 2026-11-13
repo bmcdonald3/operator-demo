@@ -2,7 +2,7 @@
 
 **Discover a real server, then generate its boot script.** The operator provides the services, Magellan reads the BMC at `172.24.0.3`, and Boot Script Service (BSS) turns the discovered node and boot configuration into iPXE instructions.
 
-The guided script follows **Magellan -> SMD post/query -> BSS**. It prints SMD's write response and queries the component endpoint matching the discovered UUID. Known NIC validation errors in the SMD write do not block the BSS steps; the response remains visible rather than being presented as a successful full import. The manual blocks below describe the direct Magellan-to-BSS path. Neither path configures DHCP or reboots the physical server.
+The guided script follows **Magellan -> SMD post/query -> BSS**. It saves SMD's write response and displays the component endpoint matching the discovered UUID. Known NIC validation errors in the SMD write do not block the BSS steps. The manual command blocks below describe the direct Magellan-to-BSS path. Neither path configures DHCP or reboots the physical server.
 
 ## Why This Is Useful
 
@@ -51,7 +51,7 @@ bash /path/to/operator-demo/demo.sh
 
 The sections below explain the calls without requiring you to read shell plumbing. Expand a command block only when you want to run that step manually. Use Bash, stay in the operator checkout, and run the blocks in order in the same shell. You need `make`, `kubectl`, `curl`, `jq`, and a pre-built `magellan` on PATH, plus access to the BMC.
 
-### 1. Deploy the Operator
+### 1. Build and Deploy the Operator
 
 **Operation:** local development setup, not a BSS API call.
 
@@ -97,7 +97,7 @@ kubectl delete namespace openchami-testcluster --ignore-not-found --wait=true
 **Result:** `testcluster` reaches `Ready`, and BSS and TokenSmith deployments are available.
 
 <details>
-<summary>Commands: apply the manifest and wait for services</summary>
+<summary>Commands: apply the control-plane manifest</summary>
 
 ```bash
 kubectl apply -n default -f test/fixtures/minimal-controlplane.yaml
@@ -163,7 +163,7 @@ BSS_JWT=$(kubectl exec -n openchami-testcluster deploy/tokensmith -- \
 
 </details>
 
-### 6. Discover the Physical Server
+### 6. Discover the Physical Server with Magellan
 
 **Operation:** Magellan probes the BMC and follows its Redfish resources to collect system and NIC inventory. This is several requests, not one POST to OpenCHAMI.
 
@@ -197,7 +197,15 @@ BOOT_MAC=$(jq -r '.[0].Systems[0].ethernet_interfaces[0].mac | ascii_downcase | 
 
 </details>
 
-### 7. Register the Node in BSS
+### 7. Send Discovered Inventory to SMD
+
+In the guided script: `POST /hsm/v2/Inventory/RedfishEndpoints`. The response is saved to `$DEMO_DIR/smd-response.txt`.
+
+### 8. Query the Hardware Stored in SMD
+
+In the guided script: `GET /hsm/v2/Inventory/ComponentEndpoints`. The display selects the discovered system's UUID and assigned BMC ID.
+
+### 9. Register the Discovered Node in BSS
 
 **Call:** `POST /nodes` at `BSS_URL`.
 
@@ -226,7 +234,7 @@ curl -fsS -X POST "$BSS_URL/nodes" \
 
 </details>
 
-### 8. Set the Boot Configuration
+### 10. Set Alpine Linux Boot Parameters
 
 **Call:** `POST /boot/v1/bootparameters` at `BSS_URL`.
 
@@ -259,7 +267,7 @@ curl -fsS -X POST "$BSS_URL/boot/v1/bootparameters" \
 
 </details>
 
-### 9. Generate the iPXE Script
+### 11. Retrieve the iPXE Script by Node Name and MAC
 
 **Call:** `GET /boot/v1/bootscript` at `BSS_URL`. No bearer token is sent, matching an unauthenticated node boot request.
 
@@ -282,7 +290,7 @@ curl -fsS "$BSS_URL/boot/v1/bootscript?mac=$BOOT_MAC"
 
 </details>
 
-### 10. Close the Local Connection
+### 12. Close the Local Connection
 
 **Operation:** stop this walkthrough's port-forward and discard temporary files and credentials. The deployed services and BSS records remain available.
 
