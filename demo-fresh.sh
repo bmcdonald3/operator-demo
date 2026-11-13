@@ -97,9 +97,8 @@ BOOT_MAC=$(jq -r "$MAC_FILTER" "$DEMO_DIR/inventory.json")
 
 printf '\n=== Send discovered inventory to SMD ===\n'
 jq -c '.[0]' "$DEMO_DIR/inventory.json" > "$DEMO_DIR/smd-endpoint.json"
-printf 'The HTTP response is shown below. SMD may report NIC validation errors while storing the component endpoint; the BSS demo continues.\n'
-run_step 'curl -sS -i -X POST "$SMD_URL/hsm/v2/Inventory/RedfishEndpoints" -H "Authorization: Bearer $SMD_JWT" -H "Content-Type: application/json" --data-binary @"$DEMO_DIR/smd-endpoint.json"' \
-  curl -sS -i -X POST "$SMD_URL/hsm/v2/Inventory/RedfishEndpoints" \
+run_step 'curl -sS -i -o "$DEMO_DIR/smd-response.txt" -X POST "$SMD_URL/hsm/v2/Inventory/RedfishEndpoints" -H "Authorization: Bearer $SMD_JWT" -H "Content-Type: application/json" --data-binary @"$DEMO_DIR/smd-endpoint.json"' \
+  curl -sS -i -o "$DEMO_DIR/smd-response.txt" -X POST "$SMD_URL/hsm/v2/Inventory/RedfishEndpoints" \
   -H "Authorization: Bearer $SMD_JWT" -H 'Content-Type: application/json' \
   --data-binary "@$DEMO_DIR/smd-endpoint.json"
 
@@ -116,9 +115,9 @@ printf '\n=== Register the discovered node in BSS ===\n'
 jq -nc --arg node "$NODE_XNAME" --arg mac "$BOOT_MAC" \
 '{apiVersion:"boot.openchami.io/v1",kind:"Node",metadata:{name:$node},spec:{xname:$node,bootMac:$mac}}' \
 > "$DEMO_DIR/node.json"
-run_step 'curl -X POST "$BSS_URL/nodes" -d @"$DEMO_DIR/node.json"' \
+run_step 'curl -X POST "$BSS_URL/nodes" -d @"$DEMO_DIR/node.json" | jq .' \
   curl -fsS -X POST "$BSS_URL/nodes" -H "Authorization: Bearer $BSS_JWT" \
-  -H 'Content-Type: application/json' -d "@$DEMO_DIR/node.json"
+  -H 'Content-Type: application/json' -d "@$DEMO_DIR/node.json" | jq .
 
 printf '\n=== Set Alpine Linux boot parameters ===\n'
 NETBOOT=https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/netboot
@@ -127,10 +126,10 @@ jq -nc --arg node "$NODE_XNAME" --arg mac "$BOOT_MAC" \
 --arg params "ip=dhcp alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v3.22/main modloop=$NETBOOT/modloop-lts" \
 '{hosts:[$node],macs:[$mac],kernel:$kernel,initrd:$initrd,params:$params}' \
 > "$DEMO_DIR/boot-parameters.json"
-run_step 'curl -X POST "$BSS_URL/boot/v1/bootparameters" -d @"$DEMO_DIR/boot-parameters.json"' \
+run_step 'curl -X POST "$BSS_URL/boot/v1/bootparameters" -d @"$DEMO_DIR/boot-parameters.json" | jq .' \
   curl -fsS -X POST "$BSS_URL/boot/v1/bootparameters" \
   -H "Authorization: Bearer $BSS_JWT" -H 'Content-Type: application/json' \
-  -d "@$DEMO_DIR/boot-parameters.json"
+  -d "@$DEMO_DIR/boot-parameters.json" | jq .
 
 printf '\n=== iPXE script by node name ===\n'
 run_step 'curl "$BSS_URL/boot/v1/bootscript?host=$NODE_XNAME"' \
